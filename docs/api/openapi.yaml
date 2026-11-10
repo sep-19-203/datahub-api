@@ -1,0 +1,355 @@
+openapi: 3.0.3
+info:
+  title: HDDT Data API (hoàn thuế) — TTHC / TMS qua APIC
+  version: 0.1.0
+  description: |
+    Hợp đồng 7 API theo `API HDDT - TTHC - TMS.xlsx` (SHA-256 4942682d…b524). Bảng field là căn cứ; các điểm mâu thuẫn
+    và phương án đang dùng: docs/spec/API_SPEC_ISSUES.md (SI-01…SI-40).
+    - Sync (HD3, HD7, GET job) ⇒ HTTP/`status` 200; Async (HD1, HD5, HD8) ⇒ 202 (SI-02); TMS ⇒ cấu hình, mặc định 200 (SI-03).
+    - Trường trace là `traceId` (không phải `tracedId` — SI-01).
+    - Date `yyyy-MM-dd`, Datetime `yyyy-MM-dd HH:mm:ss`, múi giờ Asia/Ho_Chi_Minh (SI-29). BigDecimal ghi dạng thường, giữ scale.
+    - `url` là URI S3 dạng tiền tố `s3://<bucket>/<prefix>*` (SI-07), không phải URL HTTP.
+servers:
+  - url: '{apic}'
+    variables:
+      apic:
+        default: https://apic-internal.example.invalid
+tags:
+  - name: hthue
+paths:
+  /hthue/v1/mua-vao:
+    post:
+      tags: [hthue]
+      operationId: purchaseList
+      summary: HD1 — Danh sách hóa đơn mua vào (Async, CSV 15 cột không header — API v3)
+      description: >-
+        Kết quả dưới 10.000 dòng (SI-06): phản hồi 202 chờ job xong (tối đa hddt.hd1.realtime-wait) và trả luôn
+        tthai=HOAN_THANH kèm url, tsdong; lớn hơn hoặc quá hạn chờ: tthai=TIEP_NHAN/DANG_XU_LY, lấy kết quả bằng
+        GET /hthue/v1/job/{jobId}. Chỉ HĐ mẫu 1, hoặc mẫu 5 có tiền thuế (SI-46).
+        CSV (SI-52, HD1!C42–C70 bỏ dòng gạch ngang): nbmst, khmshdon, khhdon, shdon, tdlap, tthai, nbten, tgtcthue,
+        tgtthue, thttltsuat (JSON mảng {tsuat, thtien, tthue}, bọc nháy kép), bhphap, bhpldo, bhpngay, ttmstnban,
+        lddctthe.
+      parameters: [{$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/Partner'}, {$ref: '#/components/parameters/Hmac'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PurchaseListRequest'}
+      responses:
+        '202': {$ref: '#/components/responses/JobStatus'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /hthue/v1/chi-tiet:
+    get:
+      tags: [hthue]
+      operationId: invoiceDetail
+      summary: HD3 — Chi tiết một hóa đơn (Sync)
+      parameters:
+        - {$ref: '#/components/parameters/RequestId'}
+        - {$ref: '#/components/parameters/Partner'}
+        - {$ref: '#/components/parameters/Hmac'}
+        - {name: nbmst, in: query, required: true, schema: {type: string, pattern: '^(\d{10}(-\d{3})?|\d{12})$'}}
+        - {name: khmshdon, in: query, required: true, description: 'String theo HD3!I14, 1 chữ số (SI-21)', schema: {type: string, pattern: '^\d$'}}
+        - {name: khhdon, in: query, required: true, schema: {type: string, maxLength: 11}}
+        - {name: shdon, in: query, required: true, schema: {type: integer, format: int32, minimum: 0}}
+        - {name: tdlap, in: query, required: true, schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/InvoiceDetailData'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {description: 'Khóa tra cứu khớp nhiều hóa đơn (INV/MTT…) — SI-18', content: {application/json: {schema: {$ref: '#/components/schemas/Envelope'}}}}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /hthue/v1/ban-ra:
+    post:
+      tags: [hthue]
+      operationId: salesList
+      summary: HD5 — Danh sách hóa đơn bán ra (Async, CSV 18 cột không header)
+      description: >-
+        Kết quả dưới 10.000 dòng (SI-06, HD5!AA35/AA36): phản hồi 202 chờ job xong (tối đa hddt.hd5.realtime-wait) và
+        trả luôn tthai=HOAN_THANH kèm url, tsdong; lớn hơn hoặc quá hạn chờ: tthai=TIEP_NHAN/DANG_XU_LY, lấy kết quả bằng
+        GET /hthue/v1/job/{jobId}. Chỉ HĐ mẫu 1, hoặc mẫu 5 có tiền thuế (SI-47). CSV 18 cột theo HD5!C42–C72 (sheet sửa
+        08/11): 13 cột pct* bỏ — số tiền theo thuế suất nằm trong thttltsuat (JSON mảng {tsuat, thtien, tthue}, cột 12, như
+        HD1/HD3); cột 18 lddctthe (lý do điều chỉnh/thay thế, String) lấy HOADON_HDR.GCHDGOC như HD1/HD3 (SI-53, SI-63).
+      parameters: [{$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/Partner'}, {$ref: '#/components/parameters/Hmac'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SalesListRequest'}
+      responses:
+        '202': {$ref: '#/components/responses/JobStatus'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /hthue/v1/goi-y:
+    post:
+      tags: [hthue]
+      operationId: declarationSuggestion
+      summary: HD7 — Thông tin tổng hợp gợi ý tờ khai (Sync)
+      description: 'Cập nhật 04/11 theo GiaiPhap v3.8: chỉ HĐ hợp lệ theo R1 (mẫu 1, hoặc mẫu 5 có tiền thuế) — SI-54. Mua vào [23]/[24] chỉ cộng 0%, 5%, 10%; slmvao = số HĐ mua vào hợp lệ — SI-55. Bán ra theo mã thuế suất; 8% không ánh xạ (SI-56); tgtbrktgtt (32b) không có trong tài liệu giải pháp ⇒ null; tgtbrktpvdc (34a) = mã KTPVDC (SI-58); KHAC không thuộc chỉ tiêu nào ⇒ bỏ qua. HĐ không có thuế suất ở đâu cả ⇒ suy từ tỷ lệ thuế/giá trị trên header (SI-57). 05/11: kỳ theo ngày lập, HĐ thay thế/điều chỉnh theo ngày lập HĐ gốc, cả mua vào và bán ra (SI-59); HĐ ngoại tệ quy đổi VND theo tỷ giá (SI-60); HĐ điều chỉnh thiếu tổng theo thuế suất đóng góp 0 (SI-61). 501 HDDT-501-MAPPING chỉ khi cấu hình chặn mã chưa gán (unassigned-tsuat-policy=FAIL_IF_NONZERO).'
+      parameters: [{$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/Partner'}, {$ref: '#/components/parameters/Hmac'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeclarationSuggestionRequest'}
+      responses:
+        '200':
+          description: Thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: {$ref: '#/components/schemas/DeclarationSuggestionData'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '501': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /hthue/v1/mua-vao/kiem-tra:
+    post:
+      tags: [hthue]
+      operationId: purchaseVerification
+      summary: HD8 — Kiểm tra chi tiết danh sách hóa đơn mua vào từ file S3 (Async)
+      description: 'File vào = CSV HD1 14 cột bản 06/11 (SI-12, chốt 31/10; HD8 chưa cập nhật theo v3 — KI-API-31). File kết quả: CSV 14 cột không header (HD8!C37–C63), CHỈ các dòng không hợp lệ (không tồn tại / sai khác tgtcthue hoặc tgtthue / nhiều bản ghi), ghi nguyên dòng đầu vào. 501 HDDT-501-RULE nếu hddt.hd8.rules-confirmed=false.'
+      parameters: [{$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/Partner'}, {$ref: '#/components/parameters/Hmac'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PurchaseVerificationRequest'}
+      responses:
+        '202': {$ref: '#/components/responses/JobAck'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '501': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /hthue/v1/cap-nhat-hoa-don-hoan-thue:
+    post:
+      tags: [hthue]
+      operationId: refundUpdate
+      summary: TMS — Cập nhật danh sách hóa đơn đã hoàn thuế (xử lý dạng job)
+      description: 'Job kiểm tra từng dòng (CSV 12 cột TMS!C34–C45), đối chiếu Doris, chống hoàn trùng, rồi ghi sổ hoàn Doris HD_SO_HOAN (mã công việc = jobId). Một dòng không hợp lệ ⇒ cả danh sách LOI, không ghi dòng nào.'
+      parameters: [{$ref: '#/components/parameters/RequestId'}, {$ref: '#/components/parameters/Partner'}, {$ref: '#/components/parameters/Hmac'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RefundUpdateRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/JobAck'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /hthue/v1/job/{jobId}:
+    get:
+      tags: [hthue]
+      operationId: getJob
+      summary: Kiểm tra và lấy kết quả job (Sync)
+      description: '`url`, `tsdong` chỉ có khi `tthai`=HOAN_THANH. Job của bên gọi khác (x-partner) ⇒ 404.'
+      parameters:
+        - {$ref: '#/components/parameters/RequestId'}
+        - {$ref: '#/components/parameters/Partner'}
+        - {$ref: '#/components/parameters/Hmac'}
+        - {name: jobId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {$ref: '#/components/responses/JobStatus'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+components:
+  parameters:
+    RequestId: {name: X-Request-Id, in: header, required: true, description: 'UUID; khóa idempotency cùng bên gọi x-partner (SI-36). Bật ESB HMAC thì thiếu ⇒ server tự sinh (TD-API-40)', schema: {type: string, format: uuid}}
+    Partner: {name: x-partner, in: header, required: false, description: 'Bên gọi TTHC hoặc TMS, quyết định quyền (TD-API-40; không còn X-Client-Id/X-Client-Secret). Bắt buộc khi bật ESB HMAC; ESB tắt mà không gửi ⇒ client mặc định', schema: {type: string}, example: TTHC}
+    Hmac: {name: x-hmac, in: header, required: false, description: 'hex(HMAC-SHA256(khóa ESB, "yyyyMMdd.<x-partner>")), ngày giờ VN — bắt buộc khi bật ESB HMAC, như hddt-tthc-sharing', schema: {type: string}}
+  responses:
+    Error:
+      description: Lỗi (data = null). errorCode xem README §Mã lỗi.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Envelope'}
+    JobStatus:
+      description: Thông tin job
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Envelope'
+              - type: object
+                properties:
+                  data: {$ref: '#/components/schemas/JobStatusData'}
+    JobAck:
+      description: Job đã tiếp nhận
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Envelope'
+              - type: object
+                properties:
+                  data: {$ref: '#/components/schemas/JobAckData'}
+  schemas:
+    Envelope:
+      type: object
+      required: [traceId, status, code, errorCode, message]
+      properties:
+        traceId: {type: string, format: uuid}
+        status: {type: integer}
+        code: {type: string, example: OK}
+        errorCode: {type: string, example: '0'}
+        message: {type: string, example: Thành công}
+        data: {type: object, nullable: true}
+    JobTthai:
+      type: string
+      enum: [TIEP_NHAN, DANG_XU_LY, HOAN_THANH, LOI]
+    PurchaseListRequest:
+      type: object
+      additionalProperties: false
+      required: [nmmst, tthang, dthang, lbttmsthue, lbbhphap]
+      properties:
+        nmmst: {type: string, pattern: '^(\d{10}(-\d{3})?|\d{12})$'}
+        tthang: {type: string, pattern: '^(0[1-9]|1[0-2])/\d{4}$', example: 01/2026}
+        dthang: {type: string, pattern: '^(0[1-9]|1[0-2])/\d{4}$', example: 01/2026}
+        lbttmsthue: {type: boolean, description: 'Loại HĐ có trạng thái MST NGƯỜI BÁN 03, 05, 06'}
+        lbbhphap: {type: boolean, description: 'Loại HĐ có BHPHAP = 1 (SI-27)'}
+    SalesListRequest:
+      type: object
+      additionalProperties: false
+      required: [nbmst, tthang, dthang, lbttmsthue, lbbhphap]
+      properties:
+        nbmst: {type: string, pattern: '^(\d{10}(-\d{3})?|\d{12})$'}
+        tthang: {type: string, pattern: '^(0[1-9]|1[0-2])/\d{4}$'}
+        dthang: {type: string, pattern: '^(0[1-9]|1[0-2])/\d{4}$'}
+        lbttmsthue: {type: boolean, description: 'Loại HĐ có trạng thái MST NGƯỜI MUA 03, 05, 06'}
+        lbbhphap: {type: boolean}
+    DeclarationSuggestionRequest:
+      type: object
+      additionalProperties: false
+      required: [mst, tthang, dthang]
+      properties:
+        mst: {type: string, pattern: '^(\d{10}(-\d{3})?|\d{12})$'}
+        tthang: {type: string, pattern: '^(0[1-9]|1[0-2])/\d{4}$'}
+        dthang: {type: string, pattern: '^(0[1-9]|1[0-2])/\d{4}$'}
+    PurchaseVerificationRequest:
+      type: object
+      additionalProperties: false
+      required: [nmmst, tngay, dngay, s3url]
+      properties:
+        nmmst: {type: string, pattern: '^(\d{10}(-\d{3})?|\d{12})$'}
+        tngay: {type: string, format: date}
+        dngay: {type: string, format: date}
+        s3url: {type: string, maxLength: 1024, example: 's3://hddt/import/tthc/ds_*'}
+    RefundUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [s3url]
+      properties:
+        s3url: {type: string, maxLength: 1024, example: 's3://hddt/import/tms/ds.csv'}
+    JobStatusData:
+      type: object
+      required: [jobId, jobCode, tthai]
+      properties:
+        jobId: {type: string, format: uuid}
+        jobCode: {type: string, example: hthue.mua-vao}
+        tthai: {$ref: '#/components/schemas/JobTthai'}
+        mta: {type: string, nullable: true}
+        tdkxuat: {type: string, nullable: true, example: '2026-10-28 09:52:19'}
+        url: {type: string, nullable: true, example: 's3://hddt/export/query-result/26cbb6dc-e896-45d9-bbc6-cc1d640d091f/c852ec478bc8afffb49e7-a82661eec9d995ad_*'}
+        tsdong: {type: integer, format: int64, nullable: true}
+    JobAckData:
+      type: object
+      required: [jobId, jobCode, tthai]
+      properties:
+        jobId: {type: string, format: uuid}
+        jobCode: {type: string, example: hthue.cap-nhat}
+        tthai: {$ref: '#/components/schemas/JobTthai'}
+    TaxRate:
+      type: object
+      required: [tsuat, thtien, tthue]
+      properties:
+        tsuat: {type: string, example: 8%}
+        thtien: {type: number}
+        tthue: {type: number}
+    GoodsService:
+      type: object
+      required: [ten]
+      properties:
+        ten: {type: string}
+        thtcthue: {type: number, nullable: true}
+        ltsuat: {type: string, nullable: true}
+        tthue: {type: number, nullable: true}
+    InvoiceDetailData:
+      type: object
+      required: [nbmst, khmshdon, khhdon, shdon, tdlap, tthai, nbten, tgtcthue, tgtthue, thttltsuat, ttmstnban]
+      properties:
+        nbmst: {type: string}
+        khmshdon: {type: integer}
+        khhdon: {type: string}
+        shdon: {type: integer, format: int64}
+        tdlap: {type: string, format: date}
+        nky: {type: string, nullable: true, example: '2026-10-28 09:52:19'}
+        tthai: {type: integer}
+        nbten: {type: string}
+        tgtcthue: {type: number}
+        tgtthue: {type: number}
+        thttltsuat: {type: array, items: {$ref: '#/components/schemas/TaxRate'}}
+        ttmstnban: {type: string, nullable: true, description: 'SI-24/SI-25: null khi nguồn không có MST'}
+        bhphap: {type: integer, nullable: true}
+        bhpldo: {type: string, nullable: true}
+        bhpngay: {type: string, nullable: true}
+        dshhdvu: {type: array, items: {$ref: '#/components/schemas/GoodsService'}}
+        lddctthe: {type: string, nullable: true, description: 'API v3 (HD3!C51) — lí do điều chỉnh/thay thế; nguồn HOADON_HDR.GCHDGOC (SI-53, đề xuất)'}
+    PurchaseSummary:
+      type: object
+      required: [tgtmvao, tgttmvao, slmvao]
+      properties:
+        tgtmvao: {type: number}
+        tgttmvao: {type: number}
+        slmvao: {type: integer, format: int64}
+    SalesSummary:
+      type: object
+      required: [tgtbr0, tgtbr5, tgttbr5, tgtbr10, tgttbr10, tgtbrkct, tgtbrkkknt, tgtbrktgtt, tgtbrktpvdc]
+      properties:
+        tgtbr0: {type: number}
+        tgtbr5: {type: number}
+        tgttbr5: {type: number}
+        tgtbr10: {type: number}
+        tgttbr10: {type: number}
+        tgtbrkct: {type: number}
+        tgtbrkkknt: {type: number}
+        tgtbrktgtt: {type: number, nullable: true, description: '32b — chưa có nguồn ⇒ null (chốt 01/11)'}
+        tgtbrktpvdc: {type: number, nullable: true, description: '34a — mã thuế suất KTPVDC (SI-58, 05/11)'}
+    DeclarationSuggestionData:
+      type: object
+      required: [mvao, bra]
+      properties:
+        mvao: {$ref: '#/components/schemas/PurchaseSummary'}
+        bra: {$ref: '#/components/schemas/SalesSummary'}
+        lddctthe: {type: string, nullable: true, description: 'Lý do điều chỉnh/thay thế hóa đơn (sheet 06/11 HD7!C42, N) — chưa có nguồn/quy tắc gộp ⇒ null (SI-64)'}

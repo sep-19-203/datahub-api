@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Dịch vụ API dữ liệu HĐĐT (HD1, HD3, HD5, HD7, HD8, TMS, job) — module Maven độc lập, không phụ thuộc build root.
+         Java 8 + Spring Boot 2.7.18 (migration Java 21 → Java 8, 2026-11-02; trước đó Java 21 + Spring Boot 3.5.16 — TD-API-01).
+         Spring Boot 2.7.x là dòng cuối hỗ trợ Java 8 (javax.*); Spring Boot 3.x bắt buộc Java 17+. -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.18</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>vn.teca.hddt</groupId>
+    <artifactId>hddt-data-api-service</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <name>hddt-data-api-service</name>
+    <description>API cung cap du lieu hoa don dien tu tu Apache Doris cho TTHC/TMS qua APIC</description>
+
+    <properties>
+        <java.version>1.8</java.version>
+        <!-- Doris 4.0.8 qua giao thức MySQL: dùng cùng driver đã kiểm chứng ở hddt-spark-backfill / DEV 77 -->
+        <mysql.version>8.4.0</mysql.version>
+        <!-- springdoc 2.x yêu cầu Spring Boot 3 / Java 17 ⇒ dòng 1.x (springdoc-openapi-ui) cho Spring Boot 2.7 -->
+        <springdoc.version>1.8.0</springdoc.version>
+        <!-- Giữ SnakeYAML 2.x như bản Spring Boot 3.5 (Spring Boot ≥ 2.7.10 tương thích; 1.30 mặc định của 2.7 có CVE-2022-1471) -->
+        <snakeyaml.version>2.4</snakeyaml.version>
+        <!-- Spring Boot 2.7 không quản lý Testcontainers: ghim đúng bản đã dùng với Spring Boot 3.5 (1.x hỗ trợ Java 8) -->
+        <testcontainers.version>1.21.4</testcontainers.version>
+        <!-- BOM Spring Boot 2.7.18 hạ Netty (DSE driver, AWS SDK dùng) về 4.1.101 — giữ 4.1.135 như bản trước migration
+             (dòng 4.1 vẫn chạy Java 8; tránh mở lại CVE đã vá: CVE-2025-24970, CVE-2025-55163, ...) -->
+        <netty.version>4.1.135.Final</netty.version>
+        <awssdk.version>2.39.6</awssdk.version>
+        <commons-csv.version>1.14.1</commons-csv.version>
+        <dse.driver.version>4.15.0</dse.driver.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${awssdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
+        <!-- Kho metadata job bền vững: DSE keyspace datahub_hddt (LWT) — TD-API-03b. Cùng driver đã kiểm chứng với DSE DEV
+             ở hddt-spark-backfill / hddt-datahub-realtime. -->
+        <dependency>
+            <groupId>com.datastax.oss</groupId>
+            <artifactId>java-driver-core</artifactId>
+            <version>${dse.driver.version}</version>
+        </dependency>
+
+        <!-- Doris -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.google.protobuf</groupId>
+                    <artifactId>protobuf-java</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- S3 / MinIO -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache-client</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-csv</artifactId>
+            <version>${commons-csv.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>minio</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>hddt-data-api-service</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <executable>true</executable>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Mã không được phụ thuộc múi giờ JVM: mọi định dạng ngày dùng Asia/Ho_Chi_Minh tường minh -->
+                    <argLine>-Duser.timezone=UTC</argLine>
+                    <excludes>
+                        <exclude>**/*IT.java</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- Build bằng JDK 9+ (IDE/CI): ép cờ javac "release 8" để kiểm tra API theo chữ ký Java 8, không chỉ -source/-target.
+             Build chuẩn vẫn dùng JDK 8 (javac 8 không có cờ "release"). -->
+        <profile>
+            <id>jdk9plus-release8</id>
+            <activation>
+                <jdk>[9,)</jdk>
+            </activation>
+            <properties>
+                <maven.compiler.release>8</maven.compiler.release>
+            </properties>
+        </profile>
+        <!-- Test tích hợp (DSE / MinIO / Doris): mvn verify -Pit. Mỗi IT tự bỏ qua khi thiếu hạ tầng
+             (biến môi trường IT_*; MinIO có thể qua Testcontainers nếu có Docker). -->
+        <profile>
+            <id>it</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <argLine>-Duser.timezone=UTC</argLine>
+                            <includes>
+                                <include>**/*IT.java</include>
+                            </includes>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

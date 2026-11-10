@@ -1,0 +1,55 @@
+{
+  "module": "hddt-data-api-service",
+  "repo": "http://192.168.1.69/hddt1/datahub_hddt/hddt-data-api-service.git",
+  "branch": "main",
+  "split_from": "hddt-toolkit feature/hddt-data-api-service (git subtree split, 01/11)",
+  "updated": "2026-11-01",
+  "phase": "Phase 5 - code + IT tren ha tang DEV; HD7 da chot 01/11; so hoan TMS da cai; cho Doris DEV (BE .78) de chay that",
+  "spec": {
+    "file": "/Volumes/WORK/TECAPRO/HDDT_2026/GiaiPhapAPI/API HDDT - TTHC - TMS.xlsx",
+    "sha256": "4942682d0feea668cc1731d7a7f8ddd82dcf81e0493c962737b24d8414d8b524",
+    "issues": "docs/spec/API_SPEC_ISSUES.md (SI-01..SI-45); HD7 danh gia: docs/spec/HD7_DANH_GIA_TSUAT.md"
+  },
+  "apis": {
+    "GET_job": "DONE",
+    "HD1": "DONE_DEV (NNT_HIS tam, 2 cot rong tam)",
+    "HD3": "DONE_DEV (NNT_HIS tam)",
+    "HD5": "DONE_DEV (NNT_HIS tam)",
+    "HD8": "DONE_DEV (quy tac chot 01/11: so tgtcthue, tgtthue; tra nguyen dong vao)",
+    "HD7": "DONE_DEV (chot 01/11; HTTP DEV PASS sau sua dieu kien JSON null); 32b/34a null",
+    "TMS": "DONE_DEV - so hoan Doris HD_SO_HOAN, E2E HTTP PASS 01/11"
+  },
+  "last_build": {
+    "command": "mvn -B verify -Pit (DSE DEV, MinIO 192.168.1.69, Doris DEV 192.168.1.77 sau restart BE)",
+    "jdk": "Temurin 21.0.13",
+    "unit_contract": "105/105 PASS",
+    "integration": "15/15 PASS (DorisRefundLedgerIT 1, DorisDevIT 5, DseJobStoreIT 5, S3ObjectStorageIT 4)",
+    "local_http_e2e": "PASS 01/11: TMS (hop le, idempotent, da hoan) + HD7"
+  },
+  "exact_next_task": "Do hieu nang HD7 nhanh DTL (KI-API-23); cho ma 32b/34a; quyet dinh KI-API-24; NNT that",
+  "do_not": [
+    "push",
+    "ghi credential",
+    "ket noi production",
+    "sua/don dong HD_SO_HOAN khong phai dong thu cua minh",
+    "sua repo hddt-toolkit tu day"
+  ],
+  "commits": [
+    "522143a feat: khoi tao module 7 API",
+    "cda00d3 test: IT PG/MinIO/Doris DEV",
+    "4e23f6b docs: OpenAPI/OpenShift/handoff",
+    "a181d95 docs: ghi commit cuoi phien",
+    "416aea8 feat: kho job DSE, NNT_HIS tam, OUTFILE that",
+    "ea7ff59 feat: HD8 quy tac chot 01/11",
+    "b605886 feat: so hoan TMS Doris HD_SO_HOAN + danh gia Tsuat",
+    "db234ae feat: HD7 theo chot 01/11"
+  ],
+  "job_store": "DSE keyspace datahub_hddt (LWT) - Doris bi loai sau thuc nghiem",
+  "dev_infra_created": [
+    "datahub_hddt.HD_SO_HOAN (rong)",
+    "DSE keyspace datahub_hddt (RF DC1:2) - V2 ALTER tu ap khi app khoi dong",
+    "doris.NNT_HIS + doris.NNT_HKD theo Doris_map DKT.xlsx (01/11, 8+2 dong gia; bang cu doris.NNT_HIS_OLD_20261101)",
+    "Doris local 127.0.0.1:9030: doris.NNT_HIS + doris.NNT_HKD (cung du lieu gia)"
+  ],
+  "local_env_file": "~/.config/hddt/data-api-local.env (ngoai repo, chmod 600)"
+}

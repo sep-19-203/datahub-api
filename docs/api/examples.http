@@ -1,0 +1,54 @@
+### Ví dụ gọi API (giá trị giả). Thay {{host}}. Không còn X-Client-Id/X-Client-Secret (TD-API-40): bên gọi theo x-partner;
+### bật ESB HMAC thì thêm x-hmac = hex(HMAC-SHA256(khóa, "yyyyMMdd.<x-partner>")), ngày giờ VN.
+@host = http://localhost:8080
+@rid = 75743f01-c7ce-4dd8-9e9c-9b5c43b28131
+
+### HD1 — danh sách mua vào
+POST {{host}}/hthue/v1/mua-vao
+X-Request-Id: {{rid}}
+x-partner: TTHC
+Content-Type: application/json
+
+{"nmmst":"0100000001","tthang":"01/2026","dthang":"01/2026","lbttmsthue":true,"lbbhphap":true}
+
+### HD3 — chi tiết hóa đơn
+GET {{host}}/hthue/v1/chi-tiet?nbmst=0100000002&khmshdon=1&khhdon=C26MAA&shdon=99&tdlap=2026-10-28
+X-Request-Id: 0f9b2c1e-1111-4a2b-8c3d-000000000003
+x-partner: TTHC
+
+### HD5 — danh sách bán ra
+POST {{host}}/hthue/v1/ban-ra
+X-Request-Id: 0f9b2c1e-1111-4a2b-8c3d-000000000005
+x-partner: TTHC
+Content-Type: application/json
+
+{"nbmst":"0100000002","tthang":"01/2026","dthang":"03/2026","lbttmsthue":true,"lbbhphap":true}
+
+### HD7 — gợi ý tờ khai (hiện trả 501 cho tới khi ánh xạ được duyệt)
+POST {{host}}/hthue/v1/goi-y
+X-Request-Id: 0f9b2c1e-1111-4a2b-8c3d-000000000007
+x-partner: TTHC
+Content-Type: application/json
+
+{"mst":"0100000001","tthang":"09/2026","dthang":"09/2026"}
+
+### HD8 — kiểm tra danh sách mua vào (hiện trả 501)
+POST {{host}}/hthue/v1/mua-vao/kiem-tra
+X-Request-Id: 0f9b2c1e-1111-4a2b-8c3d-000000000008
+x-partner: TTHC
+Content-Type: application/json
+
+{"nmmst":"0100000001","tngay":"2026-09-01","dngay":"2026-10-20","s3url":"s3://hddt/import/tthc/ds_*"}
+
+### TMS — cập nhật hóa đơn đã hoàn thuế
+POST {{host}}/hthue/v1/cap-nhat-hoa-don-hoan-thue
+X-Request-Id: 0f9b2c1e-1111-4a2b-8c3d-000000000009
+x-partner: TMS
+Content-Type: application/json
+
+{"s3url":"s3://hddt/import/tms/ds_20261031.csv"}
+
+### Job
+GET {{host}}/hthue/v1/job/26cbb6dc-e896-45d9-bbc6-cc1d640d091f
+X-Request-Id: 0f9b2c1e-1111-4a2b-8c3d-00000000000a
+x-partner: TTHC

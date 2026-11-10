@@ -1,0 +1,188 @@
+# Mẫu triển khai OpenShift — CHƯA áp dụng ở môi trường nào. Thay IMAGE_REGISTRY/TAG, namespace APIC, host.
+# Tách 2 Deployment: "api" (nhận HTTP, WORKER_ENABLED=false) và "worker" (chạy job, không nhận traffic) để cô lập tài nguyên.
+# Secret tạo riêng, KHÔNG commit giá trị thật:
+#   oc create secret generic hddt-data-api-service \
+#     --from-literal=DSE_USERNAME=... --from-literal=DSE_PASSWORD=... --from-literal=DORIS_PASSWORD=... \
+#     --from-literal=S3_ACCESS_KEY=... --from-literal=S3_SECRET_KEY=... \
+#     --from-literal=APIC_GATEWAY_TOKEN_SHA256=... \
+#     --from-literal=ESB_HMAC_KEY=...          # TD-API-40: = tthc.hmac.key của tthc-sharing; có ⇒ bắt buộc x-partner + x-hmac; không tạo ⇒ KHÔNG xác thực
+# Không còn secret client X-Client-Id/X-Client-Secret (09/11 — chỉ gọi nội bộ): bên gọi/quyền theo header x-partner.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hddt-data-api-service
+  labels: {app: hddt-data-api-service}
+data:
+  SPRING_PROFILES_ACTIVE: prod
+  DSE_CONTACT_POINTS: dse-1:9042,dse-2:9042,dse-3:9042
+  DSE_LOCAL_DC: DC1
+  DSE_JOB_KEYSPACE: datahub_hddt
+  DSE_CREATE_SCHEMA: "false"
+  DORIS_JDBC_URL: "jdbc:mysql://doris-fe:9030/?useSSL=false&connectTimeout=5000&socketTimeout=7300000"
+  DORIS_USERNAME: hddt_api_ro
+  DORIS_DATABASE: datahub_hddt
+  DORIS_POOL_SIZE: "20"
+  S3_ENDPOINT: http://minio.hddt.svc:9000
+  S3_EXPORT_BUCKET: hddt
+  S3_ALLOWED_INPUT_BUCKETS: hddt
+  # Endpoint S3 nhìn từ Doris BE (OUTFILE) — phải định tuyến được từ mọi BE (kiểm chứng DEV: BE không tới được ⇒ lỗi curl 28)
+  S3_DORIS_ENDPOINT: http://minio.hddt.svc:9000
+  EXPORT_ENGINE: OUTFILE
+  # SI-24: để trống cho tới khi xác nhận nguồn trạng thái MST (HD1/HD3/HD5/HD8 trả 503)
+  # SI-65: view NNT_ALL_STATUS, phải trả 3 cột (MST, MST_CU, TRANG_THAI) — MST cũ tra qua MST_CU
+  MST_STATUS_SOURCE_SQL: "SELECT MST, MST_CU, TRANG_THAI FROM doris.NNT_ALL_STATUS"
+  APIC_GATEWAY_TOKEN_HEADER: X-APIC-Gateway-Token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hddt-data-api-service
+  labels: {app: hddt-data-api-service}
+type: Opaque
+stringData:
+  DSE_USERNAME: REPLACE_ME
+  DSE_PASSWORD: REPLACE_ME
+  DORIS_PASSWORD: REPLACE_ME
+  S3_ACCESS_KEY: REPLACE_ME
+  S3_SECRET_KEY: REPLACE_ME
+  APIC_GATEWAY_TOKEN_SHA256: REPLACE_WITH_SHA256_HEX
+  # TD-API-40: khóa HMAC ESB (= tthc.hmac.key của hddt-tthc-sharing). KHÔNG đi qua ESB ⇒ XÓA dòng này (không có khóa =
+  # KHÔNG xác thực, quyền theo x-partner); để nguyên giá trị mẫu ⇒ mọi request /hthue/** bị 401.
+  ESB_HMAC_KEY: REPLACE_ME_OR_REMOVE
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hddt-data-api
+  labels: {app: hddt-data-api-service, role: api}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: hddt-data-api-service, role: api}
+  template:
+    metadata:
+      labels: {app: hddt-data-api-service, role: api}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: "8080"
+    spec:
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: app
+          image: IMAGE_REGISTRY/hddt-data-api-service:TAG
+          ports: [{containerPort: 8080, name: http}]
+          env:
+            - {name: WORKER_ENABLED, value: "false"}
+          envFrom:
+            - configMapRef: {name: hddt-data-api-service}
+            - secretRef: {name: hddt-data-api-service}
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: 8080}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: 8080}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests: {cpu: "1", memory: 1Gi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hddt-data-api-worker
+  labels: {app: hddt-data-api-service, role: worker}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: hddt-data-api-service, role: worker}
+  template:
+    metadata:
+      labels: {app: hddt-data-api-service, role: worker}
+    spec:
+      # > worker.shutdown-grace (50s) + web shutdown; job chưa xong được pod khác nhận lại khi lease (2 phút) hết hạn
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: app
+          image: IMAGE_REGISTRY/hddt-data-api-service:TAG
+          ports: [{containerPort: 8080, name: http}]
+          env:
+            - {name: WORKER_ENABLED, value: "true"}
+            - {name: WORKER_CONCURRENCY, value: "4"}
+          envFrom:
+            - configMapRef: {name: hddt-data-api-service}
+            - secretRef: {name: hddt-data-api-service}
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: 8080}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: 8080}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            # HD8/TMS đọc luồng + tập dấu vân tay khóa (~100 MB / 1 triệu dòng); export OUTFILE chạy trên Doris
+            requests: {cpu: "1", memory: 2Gi}
+            limits: {cpu: "2", memory: 3Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hddt-data-api
+  labels: {app: hddt-data-api-service}
+spec:
+  selector: {app: hddt-data-api-service, role: api}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}
+---
+# Route nội bộ cho APIC (TLS). Chỉ APIC được gọi tới — giới hạn thêm bằng NetworkPolicy bên dưới.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: hddt-data-api
+  labels: {app: hddt-data-api-service}
+  annotations:
+    haproxy.router.openshift.io/ip_whitelist: "APIC_CIDR"
+    haproxy.router.openshift.io/timeout: 60s
+spec:
+  host: hddt-data-api.apps.example.invalid
+  to: {kind: Service, name: hddt-data-api}
+  port: {targetPort: http}
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hddt-data-api-ingress
+spec:
+  podSelector:
+    matchLabels: {app: hddt-data-api-service}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {network.openshift.io/policy-group: ingress}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: APIC_NAMESPACE}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: MONITORING_NAMESPACE}
+      ports: [{port: 8080, protocol: TCP}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hddt-data-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: hddt-data-api-service, role: api}
