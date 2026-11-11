@@ -21,9 +21,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
+import org.springframework.core.env.Environment;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -47,6 +49,9 @@ public class JobWorker implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(JobWorker.class);
 
     private final JobRepository jobs;
+    private JobResultPublisher resultPublisher;
+    @Autowired
+    private Environment environment;
     private final Map<JobType, JobHandler> handlers = new EnumMap<>(JobType.class);
     private final HddtProperties.Worker cfg;
     private final MeterRegistry metrics;
@@ -76,6 +81,32 @@ public class JobWorker implements SmartLifecycle {
         metrics.gauge("hddt.worker.running", slots, s -> cfg.concurrency() - s.availablePermits());
     }
 
+    @Autowired(required = false)
+    public void setResultPublisher(JobResultPublisher resultPublisher) {
+        this.resultPublisher = resultPublisher;
+    }
+
+    private void publishResult(UUID jobId) {
+        if (resultPublisher == null) {
+            log.warn("JOB_RESULT_SKIPPED jobId={} workerId={} reason=publisher_absent; kiểm tra hddt.job-result.enabled và bản JAR đang chạy", jobId, workerId);
+            return;
+        }
+        try {
+            log.info("JOB_RESULT_LOAD jobId={} workerId={}", jobId, workerId);
+            Job finished = jobs.findById(jobId).orElseThrow(() -> new IllegalStateException("Không tìm thấy job " + jobId));
+            log.info("JOB_RESULT_LOADED jobId={} clientId={} state={} rowCount={} resultUrlPresent={}",
+                    jobId, finished.clientId(), finished.state(), finished.rowCount(), finished.resultUrl() != null);
+            resultPublisher.publish(finished);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("JOB_RESULT_INTERRUPTED jobId={}; gửi bị ngắt, chưa xác nhận broker, không lưu hàng chờ", jobId);
+        } catch (Exception e) {
+            log.error("JOB_RESULT_FAILED jobId={} errorType={} causeType={} detail={}; chưa xác nhận broker, không lưu hàng chờ",
+                    jobId, e.getClass().getSimpleName(), e.getCause() == null ? "none" : e.getCause().getClass().getSimpleName(),
+                    JobFailures.mask(e.toString()));
+        }
+    }
+
     private static String hostName() {
         try {
             return InetAddress.getLocalHost().getHostName();
@@ -100,6 +131,12 @@ public class JobWorker implements SmartLifecycle {
         running = true;
         scheduler.scheduleWithFixedDelay(this::pollSafely, 0, cfg.pollInterval().toMillis(), TimeUnit.MILLISECONDS);
         log.info("JobWorker {} khởi động: concurrency={}, lease={}", workerId, cfg.concurrency(), cfg.lease());
+        log.info("JOB_RESULT_WORKER workerId={} publisherPresent={} enabledProperty={} activeProfiles={}", workerId,
+                resultPublisher != null, environment == null ? "unknown" : environment.getProperty("hddt.job-result.enabled", "false"),
+                environment == null ? "unknown" : String.join(",", environment.getActiveProfiles()));
+        if (resultPublisher == null) {
+            log.warn("JOB_RESULT_DISABLED workerId={}; worker không có publisher, job xong sẽ không gửi Kafka; kiểm tra hddt.job-result.enabled", workerId);
+        }
     }
 
     @Override
@@ -158,6 +195,10 @@ public class JobWorker implements SmartLifecycle {
             executor.submit(() -> {
                 try {
                     run(job);
+                } catch (RuntimeException | Error e) {
+                    log.error("JOB_WORKER_UNHANDLED jobId={} workerId={} errorType={} detail={}",
+                            job.jobId(), workerId, e.getClass().getSimpleName(), JobFailures.mask(e.toString()));
+                    throw e;
                 } finally {
                     localRunning.get(job.type()).decrementAndGet();
                     slots.release();
@@ -193,20 +234,29 @@ public class JobWorker implements SmartLifecycle {
             }
         }, period, period, TimeUnit.MILLISECONDS);
         String outcome = "error";
+        boolean completed = false;
         try {
             if (job.attemptNo() > job.maxAttempts()) {
-                jobs.markFailed(job.jobId(), workerId, job.attemptNo(), "HDDT-500-ATTEMPTS",
+                log.info("JOB_FINALIZE_BEGIN jobId={} target=FAILED reason=max_attempts attempt={}", job.jobId(), job.attemptNo());
+                completed = jobs.markFailed(job.jobId(), workerId, job.attemptNo(), "HDDT-500-ATTEMPTS",
                         "Vượt số lần thử", "Job vượt số lần thử tối đa");
+                log.info("JOB_FINALIZE_END jobId={} target=FAILED applied={}", job.jobId(), completed);
                 outcome = "failed";
                 return;
             }
             JobHandler handler = handlers.get(job.type());
             JobRepository.Completion completion = handler.execute(ctx);
+            log.info("JOB_HANDLER_DONE jobId={} type={} attempt={} rowCount={} resultUrlPresent={}",
+                    job.jobId(), job.type(), job.attemptNo(), completion.rowCount(), completion.resultUrl() != null);
             ctx.ensureOwned();
+            log.info("JOB_FINALIZE_BEGIN jobId={} target=SUCCEEDED attempt={}", job.jobId(), job.attemptNo());
             if (jobs.markSucceeded(job.jobId(), workerId, job.attemptNo(), completion)) {
-                jobs.recordEvent(job.jobId(), "SUCCEEDED", job.attemptNo(), workerId, null);
+                completed = true;
+                log.info("JOB_FINALIZE_END jobId={} target=SUCCEEDED applied=true", job.jobId());
                 outcome = "succeeded";
+                jobs.recordEvent(job.jobId(), "SUCCEEDED", job.attemptNo(), workerId, null);
             } else {
+                log.warn("JOB_FINALIZE_END jobId={} target=SUCCEEDED applied=false", job.jobId());
                 log.warn("Job {} đã bị worker khác nhận; bỏ kết quả lần thử {}", job.jobId(), job.attemptNo());
                 outcome = "lease_lost";
             }
@@ -214,9 +264,20 @@ public class JobWorker implements SmartLifecycle {
             log.warn("Job {} mất lease ở lần thử {}", job.jobId(), job.attemptNo());
             outcome = "lease_lost";
         } catch (Throwable t) {
-            outcome = fail(job, t);
+            if (completed) {
+                log.error("Job {} đã chốt kết quả nhưng ghi event thất bại: {}", job.jobId(), JobFailures.mask(t.toString()));
+            } else {
+                outcome = fail(job, t);
+                completed = "failed".equals(outcome);
+            }
         } finally {
             heartbeat.cancel(false);
+            if (completed) {
+                publishResult(job.jobId());
+            } else {
+                log.info("JOB_RESULT_SKIPPED jobId={} workerId={} reason=terminal_not_confirmed outcome={}",
+                        job.jobId(), workerId, outcome);
+            }
             sample.stop(metrics.timer("hddt.job.duration", "type", job.type().name(), "outcome", outcome));
             metrics.counter("hddt.job.outcome", "type", job.type().name(), "outcome", outcome).increment();
             MDC.remove("jobId");
@@ -233,8 +294,17 @@ public class JobWorker implements SmartLifecycle {
             log.warn("Job {} lỗi tạm thời lần {} — thử lại lúc {}: {}", job.jobId(), job.attemptNo(), next, f.internalMessage());
             return "retry";
         }
-        jobs.markFailed(job.jobId(), workerId, job.attemptNo(), f.errorCode(), f.internalMessage(), f.description());
-        jobs.recordEvent(job.jobId(), "FAILED", job.attemptNo(), workerId, f.internalMessage());
+        log.info("JOB_FINALIZE_BEGIN jobId={} target=FAILED attempt={} errorCode={}", job.jobId(), job.attemptNo(), f.errorCode());
+        if (!jobs.markFailed(job.jobId(), workerId, job.attemptNo(), f.errorCode(), f.internalMessage(), f.description())) {
+            log.warn("JOB_FINALIZE_END jobId={} target=FAILED applied=false", job.jobId());
+            return "lease_lost";
+        }
+        log.info("JOB_FINALIZE_END jobId={} target=FAILED applied=true", job.jobId());
+        try {
+            jobs.recordEvent(job.jobId(), "FAILED", job.attemptNo(), workerId, f.internalMessage());
+        } catch (RuntimeException e) {
+            log.error("Job {} đã chốt LOI nhưng ghi event thất bại: {}", job.jobId(), JobFailures.mask(e.toString()));
+        }
         if (f.errorCode() != null && f.errorCode().startsWith("HDDT-500")) {
             log.error("Job {} thất bại ({}): {}", job.jobId(), f.errorCode(), f.internalMessage());
         } else {

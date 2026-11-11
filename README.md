@@ -27,6 +27,75 @@ APIC ──TLS──► Route ─► [api pods] ClientAuthenticationFilter ─�
 Chi tiết: `docs/architecture/ARCHITECTURE.md`, triển khai: `docs/architecture/DEPLOYMENT_OPENSHIFT.md`, hợp đồng: `docs/api/openapi.yaml`,
 phân tích đặc tả: `docs/spec/`.
 
+### Kết quả job gửi TTHC và TMS qua Kafka (working tree 10/11/2026)
+
+`JobWorker` chốt `SUCCEEDED`/`FAILED` thành công rồi gọi `JobResultPublisher` gửi trực tiếp XML theo
+`Chuan_XML_nhan_KQ_JOB.docx` lên Kafka internal `datahub-job-result-out` (key = `jobId`), đợi broker xác nhận.
+Không lưu trạng thái gửi/hàng chờ vào DSE, không có DDL mới hay tác vụ poll Kafka. Kho job DSE hiện có vẫn phục vụ
+xử lý job; khi gửi đọc lại đúng một job theo ID để lấy trạng thái/kết quả cuối. Job `RETRY_WAIT` hoặc mất lease không gửi.
+Job của client `tthc-hthue` và `tms-hthue` cùng đi topic này theo quyết định của Sếp 10/11; `ReceiptCode` phân biệt đích.
+Job TMS thành công có `TSDong` nhưng không có `URL` vì chỉ ghi sổ hoàn. GET job vẫn dùng để tra cứu.
+Lỗi gửi chỉ ghi log, không đổi trạng thái job, không tự gửi lại ở tầng ứng dụng; process dừng sau khi chốt job có thể
+không phát được bản tin. Kafka producer có retry/idempotence trong phiên, không thay thế hàng chờ bền vững.
+
+- **Trước khi bật:** cấp kết nối Kafka nội bộ (bootstrap, SASL nếu cụm yêu cầu) và quyền ghi topic cho service; không cần tạo bảng gửi kết quả.
+- **Trục internal như luồng TTHC của HDDT** (Sếp chốt 10/11): `JobResultPublisher` dùng đích danh `kafkaInternalTemplate`,
+  đọc cùng property với `hddt-registration.KafkaInternalConfig`: `hddt.kafka.internal.bootstrap-servers`,
+  `hddt.kafka.security-protocol`, `hddt.kafka.sasl.mechanism`, `hddt.kafka.internal.sasl.jaas-config`.
+  Chỉ đổi topic kết quả thành `datahub-job-result-out`; không chuyển sang Kafka external.
+- Gửi Kafka **bật mặc định** (`hddt.job-result.enabled=${JOB_RESULT_ENABLED:true}`, Sếp chốt 10/11).
+  `JOB_RESULT_ENABLED=false` vẫn ghi đè để tắt; cấu hình ngoài JAR cần đổi nếu còn đặt false.
+  `application.yml` đã có mặc định **UAT internal ngày 10/11/2026**: broker `10.64.111.76:9093`,
+  `SASL_PLAINTEXT`, `SCRAM-SHA-256`; môi trường khác phải ghi đè
+  `KAFKA_INTERNAL_BOOTSTRAP_SERVERS`, `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM` tương ứng.
+  Sếp chốt tiếp 10/11: `hddt.kafka.internal.sasl.jaas-config` khai báo trực tiếp trong YAML như bản realtime UAT;
+  JAR build từ cấu hình này chứa credential UAT. Không in JAAS hoặc chép giá trị vào tài liệu/log.
+  `KAFKA_INTERNAL_SASL_JAAS_CONFIG` cũ không còn được YAML tham chiếu; broker/protocol/mechanism vẫn cho env override.
+  Dùng cùng broker/security internal đã cấp cho HDDT trong đúng môi trường.
+  Biến chung cũ `KAFKA_BOOTSTRAP_SERVERS` không chọn được đích producer này.
+  `JOB_RESULT_TOPIC` mặc định `datahub-job-result-out`;
+  `JOB_RESULT_CLIENT_ID` mặc định `tthc-hthue`, `JOB_RESULT_TMS_CLIENT_ID` mặc định `tms-hthue`.
+- Mặc định UAT: `JOB_RESULT_SEND_CODE=HDDT`, `JOB_RESULT_TTHC_RECEIPT_CODE=TTHC`, `JOB_RESULT_TMS_RECEIPT_CODE=TMS`;
+  cả ba vẫn có thể ghi đè qua env. Thiếu/rỗng giá trị hiệu lực khi bật sẽ báo lỗi startup.
+  Tên TTHC đã đổi từ `JOB_RESULT_RECEIPT_CODE` / `hddt.job-result.receipt-code` sang
+  `JOB_RESULT_TTHC_RECEIPT_CODE` / `hddt.job-result.tthc-receipt-code`; cấu hình triển khai phải đổi theo, không dùng alias cũ.
+  Đề xuất mã gửi `HDDT` dựa vào `hddt-registration.TTHCServiceImpl` (`MNGui`); hai mã nhận cần TTHC/TMS xác nhận.
+  Sếp chốt dùng cùng XML `TTHCDLieu` cho cả hai bên; `TTJob=HOAN_THANH` ⇒ `KQKTra.TThai=1`, `KQKTra.MTa=Thành công`;
+  `TTJob=LOI` ⇒ `KQKTra.TThai=0`, `KQKTra.MTa=Không thành công` (chốt annotation 10/11).
+  Khi `LOI`, `URL`/`TSDong` bị lược bỏ; `KQJob.MTa` vẫn là mô tả lỗi cụ thể của job.
+- `TGGui` là lúc gửi; `TDKXuat` lấy `finished_at` của job theo giờ Việt Nam. Đây là điểm khác GET job hiện dùng `created_at`
+  cho trường cùng tên; cần TTHC xác nhận ý nghĩa trước khi bật.
+- **Một topic, hai bên nhận trực tiếp:** dùng hai consumer group khác nhau; mỗi group đọc cả hai loại bản tin và lọc theo
+  `ReceiptCode` trước khi xử lý. ACL Kafka chỉ chặn theo topic, không cách ly dữ liệu từng bên trong topic chung; cần bên
+  tích hợp chấp nhận phạm vi nhìn thấy này hoặc dùng một trục nhận chung để định tuyến tiếp.
+- **Thứ tự chuyển luồng:** TTHC/TMS xác nhận XML và subscribe topic mới (dedupe `MJob`) → cấp Kafka ACL →
+  bật `JOB_RESULT_ENABLED=true` trên mọi pod chạy worker và cấu hình mã gửi/nhận → test job đạt/lỗi cho cả hai bên,
+  kiểm offset của từng group → các bên mới ngừng gọi GET job để chờ. Job kết thúc khi cờ còn tắt không phát Kafka;
+  không hồi tố tự động. Một lần gửi giữ worker slot trong lúc chờ broker (get timeout 10s, send có thể chờ metadata/buffer).
+
+### Đọc log khi job xong nhưng chưa thấy kết quả Kafka
+
+Log mới ở mức INFO/WARN/ERROR, không cần bật DEBUG toàn Kafka. Theo dõi đúng process/pod worker xử lý job.
+
+| Marker | Ý nghĩa / kiểm tra tiếp |
+|---|---|
+| `JOB_RESULT_WORKER` | In `workerId`, publisher có được inject không, giá trị hiệu lực `hddt.job-result.enabled`, active profiles |
+| `JOB_RESULT_DISABLED` hoặc `reason=publisher_absent` | Worker không có publisher; kiểm cờ `JOB_RESULT_ENABLED=true` trên đúng worker và bản JAR triển khai |
+| `JOB_RESULT_KAFKA_CONFIG` | Broker/security protocol/SASL mechanism đang dùng; chỉ log JAAS có cấu hình hay không, không log credential |
+| `JOB_RESULT_PUBLISHER_READY` | Topic và mapping client → ReceiptCode đã khởi tạo |
+| `JOB_HANDLER_DONE` → `JOB_FINALIZE_BEGIN` → `JOB_FINALIZE_END applied=true` | Handler đã trả kết quả và repository đã trả xác nhận chốt job; log xuất CSV trước đó chưa chứng minh đã chốt |
+| `reason=terminal_not_confirmed` | Chưa nhận xác nhận chốt job: kiểm outcome, mất lease/retry hoặc lỗi DSE sau LWT |
+| `JOB_WORKER_UNHANDLED` | Lỗi thoát worker task trước đây có thể bị Future giữ im lặng; log kiểu lỗi và thông điệp đã mask |
+| `JOB_RESULT_LOAD` → `JOB_RESULT_LOADED` | Đọc kết quả cuối của job trước gửi; in state/client/số dòng, chỉ in cờ URL có hay không |
+| `reason=unmapped_client` | Client lưu trong job không khớp hai client cấu hình; kiểm x-partner/mapping khi tạo job |
+| `JOB_RESULT_SEND_BEGIN` | Bắt đầu gọi Kafka; không in XML/URL hay danh sách hóa đơn |
+| `JOB_RESULT_BROKER_ACK` | Broker xác nhận; dùng topic/partition/offset để đối chiếu UI/consumer, chưa chứng minh bên nhận đã xử lý |
+| `JOB_RESULT_FAILED` / `JOB_RESULT_INTERRUPTED` | Chưa lấy được xác nhận broker hoặc đọc job/dựng XML lỗi; kiểm marker trước đó và causeType. Timeout không khẳng định bản tin không thể tới broker sau đó |
+
+UAT 10/11, job `e9bb1e4d-52f5-4608-a23d-6cf2bd8ddfe9`: COUNT trả nhanh timeout 30s chỉ làm POST trả trạng thái;
+Sếp xác nhận GET sau đó báo hoàn thành, handler log xuất 55 dòng/1 file. Bản trước không log gửi thành công hoặc bỏ qua publisher
+nên chưa thể kết luận Kafka lỗi/cờ tắt từ sự vắng log. Bản log mới phải build/deploy trước; job cũ không tự phát lại.
+
 ## Build & test
 
 ```bash

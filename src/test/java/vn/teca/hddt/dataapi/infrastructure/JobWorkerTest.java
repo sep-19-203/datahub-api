@@ -26,9 +26,11 @@ import vn.teca.hddt.dataapi.domain.job.JobState;
 import vn.teca.hddt.dataapi.domain.job.JobType;
 import vn.teca.hddt.dataapi.domain.job.NewJob;
 import vn.teca.hddt.dataapi.infrastructure.worker.JobWorker;
+import vn.teca.hddt.dataapi.infrastructure.worker.JobResultPublisher;
 import vn.teca.hddt.dataapi.support.InMemoryJobRepository;
 import vn.teca.hddt.dataapi.support.TestProps;
 
+@org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
 class JobWorkerTest {
     final InMemoryJobRepository repo = new InMemoryJobRepository();
     JobWorker worker;
@@ -90,7 +92,37 @@ class JobWorkerTest {
     }
 
     @Test
-    void success_isPublishedOnlyAfterHandlerReturns() throws Exception {
+    void publishesOnlyCommittedTerminalJobsAndKafkaFailureDoesNotChangeJobState(org.springframework.boot.test.system.CapturedOutput output) throws Exception {
+        UUID success = enqueue(JobType.PURCHASE_LIST, 3);
+        UUID failed = enqueue(JobType.SALES_LIST, 3);
+        UUID retry = enqueue(JobType.REFUND_UPDATE, 3);
+        JobResultPublisher publisher = org.mockito.Mockito.mock(JobResultPublisher.class);
+        java.util.concurrent.CountDownLatch sent = new java.util.concurrent.CountDownLatch(2);
+        org.mockito.Mockito.doAnswer(call -> {
+            Job job = call.getArgument(0);
+            assertThat(job.state()).isIn(JobState.SUCCEEDED, JobState.FAILED);
+            assertThat(repo.get(job.jobId()).state()).isEqualTo(job.state());
+            sent.countDown();
+            throw new IllegalStateException("Kafka down");
+        }).when(publisher).publish(org.mockito.ArgumentMatchers.any(Job.class));
+        worker = new JobWorker(repo, Jdk8Compat.listOf(
+                handler(JobType.PURCHASE_LIST, ctx -> new Completion(null, null, null, "{}", 2L, "ok")),
+                handler(JobType.SALES_LIST, ctx -> { throw new PermanentJobException("HDDT-400-FILE", "File sai"); }),
+                handler(JobType.REFUND_UPDATE, ctx -> { throw new DataAccessResourceFailureException("Doris down"); })),
+                fastPolling(), new SimpleMeterRegistry());
+        worker.setResultPublisher(publisher);
+        worker.start();
+        assertThat(sent.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        await(retry, JobState.RETRY_WAIT);
+        worker.stop();
+        assertThat(repo.get(success).state()).isEqualTo(JobState.SUCCEEDED);
+        assertThat(repo.get(failed).state()).isEqualTo(JobState.FAILED);
+        org.mockito.Mockito.verify(publisher, org.mockito.Mockito.times(2)).publish(org.mockito.ArgumentMatchers.any(Job.class));
+        assertThat(output.getOut()).contains("JOB_FINALIZE_END", "JOB_RESULT_LOADED", "JOB_RESULT_FAILED", "reason=terminal_not_confirmed");
+    }
+
+    @Test
+    void success_isPublishedOnlyAfterHandlerReturns(org.springframework.boot.test.system.CapturedOutput output) throws Exception {
         UUID id = enqueue(JobType.PURCHASE_LIST, 3);
         start(handler(JobType.PURCHASE_LIST, ctx -> new Completion("hddt", "p/", "s3://hddt/p/x_*", "{}", 5L, "Thành công")));
         Job j = await(id, JobState.SUCCEEDED);
@@ -98,6 +130,8 @@ class JobWorkerTest {
         assertThat(j.rowCount()).isEqualTo(5);
         assertThat(j.attemptNo()).isEqualTo(1);
         assertThat(repo.events).contains("STARTED", "SUCCEEDED");
+        worker.stop();
+        assertThat(output.getOut()).contains("JOB_RESULT_DISABLED", "reason=publisher_absent");
     }
 
     @Test

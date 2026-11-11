@@ -73,7 +73,7 @@ hddt:
     contact-points: ${DSE_CONTACT_POINTS:10.64.112.248:9042}
     local-datacenter: ${DSE_LOCAL_DC:DC_Ana}
     username: ${DSE_USERNAME:admin}
-    password: ${DSE_PASSWORD:}
+    password: ${DSE_PASSWORD:Hddt@2025}
     keyspace: ${DSE_JOB_KEYSPACE:datahub_hddt}
     # replication: mặc định {'class': 'NetworkTopologyStrategy', 'DC1': '2'}; ghi đè bằng biến HDDT_DSE_REPLICATION
     create-schema: ${DSE_CREATE_SCHEMA:false}
@@ -82,20 +82,20 @@ hddt:
   doris:
     jdbc-url: ${DORIS_JDBC_URL:jdbc:mysql://10.64.87.25:9030/?useSSL=false}
     username: ${DORIS_USERNAME:doris}
-    password: ${DORIS_PASSWORD:}
+    password: ${DORIS_PASSWORD:Tct#$123}
     database: ${DORIS_DATABASE:datahub_hddt_v5}
     pool-size: ${DORIS_POOL_SIZE:20}
     sync-query-timeout-seconds: 30
     lookup-query-timeout-seconds: 600
     export-query-timeout-seconds: 7200
     # DB-P1-03 (TD-API-34): true ⇒ HD1/HD5/HD8/TMS đọc HD_MST_LIST DDL v5, không JOIN HOADON_HDR. Chỉ bật khi LIST là v5
-    # và đối soát LIST ↔ HDR của toolkit (LIST_CONTENT_VS_HDR) = 0 lệch.
+    # và đối soát LIST ↔️ HDR của toolkit (LIST_CONTENT_VS_HDR) = 0 lệch.
     list-serving: ${DORIS_LIST_SERVING:false}
   s3:
     endpoint: ${S3_ENDPOINT:http://10.64.84.223:9020}
     region: ${S3_REGION:us-east-1}
-    access-key: ${S3_ACCESS_KEY:}
-    secret-key: ${S3_SECRET_KEY:}
+    access-key: ${S3_ACCESS_KEY:1_hddt-uat_accid}
+    secret-key: ${S3_SECRET_KEY:E0oxBNanPfDFuHqPMvzrZNKZZfXJ}
     path-style: true
     export-bucket: ${S3_EXPORT_BUCKET:hddt-doc-uat}
     export-prefix: export/query-result
@@ -214,6 +214,27 @@ hddt:
       REFUND_UPDATE: 1
   # TD-API-40 (09/11): KHÔNG còn X-Client-Id/X-Client-Secret — module chỉ được gọi nội bộ qua trục ESB.
   # Bên gọi xác định bằng header x-partner → partner-clients → clients (quyền, phạm vi MST, rate-limit).
+  kafka:
+    # Giá trị mặc định cho UAT internal (10/11/2026); môi trường khác ghi đè qua env.
+    security-protocol: ${KAFKA_SECURITY_PROTOCOL:SASL_PLAINTEXT}
+    sasl:
+      mechanism: ${KAFKA_SASL_MECHANISM:SCRAM-SHA-256}
+    internal:
+      bootstrap-servers: ${KAFKA_INTERNAL_BOOTSTRAP_SERVERS:10.64.111.76:9093}
+      sasl:
+        # JAAS UAT trực tiếp như cấu hình realtime (Sếp chốt 10/11/2026).
+        jaas-config: 'org.apache.kafka.common.security.scram.ScramLoginModule required  username="kafka-admin" password="hLKa5J@c12";'
+      producer:
+        max-request-size: 2000000
+
+  job-result:
+    enabled: ${JOB_RESULT_ENABLED:true}
+    topic: datahub-job-result-out
+    send-code: ${JOB_RESULT_SEND_CODE:HDDT}
+    tthc-receipt-code: ${JOB_RESULT_TTHC_RECEIPT_CODE:TTHC}
+    tms-receipt-code: ${JOB_RESULT_TMS_RECEIPT_CODE:TMS}
+    client-id: tthc-hthue
+    tms-client-id: tms-hthue
   security:
     gateway-token-header: ${APIC_GATEWAY_TOKEN_HEADER:}
     gateway-token-sha256: ${APIC_GATEWAY_TOKEN_SHA256:}
